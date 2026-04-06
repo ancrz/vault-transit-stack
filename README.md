@@ -1,6 +1,12 @@
 # Vault Transit Stack
 
-Dual HashiCorp Vault deployment with transit auto-unseal. `vault-a` runs the transit secrets engine and acts as the unseal provider; `vault-b` is the primary secrets store that auto-unseals on every startup by communicating with vault-a's transit engine. Both instances run independently and persistently, bound to localhost-only ports, over a private Docker bridge network.
+Single HashiCorp Vault with Shamir seal, managed by an Ansible-driven auto-unseal
+playbook. Vault runs as a single Docker container with file-based storage, bound
+to localhost only. Unseal keys are stored in an Ansible Vault-encrypted file and
+applied automatically via playbook after each container restart or host reboot.
+
+The legacy dual-vault transit auto-unseal configuration is archived in
+[docs/legacy-transit/](docs/legacy-transit/) for reference.
 
 ---
 
@@ -9,19 +15,20 @@ Dual HashiCorp Vault deployment with transit auto-unseal. `vault-a` runs the tra
 ```mermaid
 graph TB
     subgraph Host
-        UA[localhost:8282] --> VA
-        UB[localhost:8283] --> VB
+        OP[localhost:8200] --> V
+        AP[Ansible Playbook\nvault-unseal.yml] -->|Shamir unseal keys\nno_log: true| V
     end
 
     subgraph vault-internal network
-        VA[vault-a-server\nTransit Unseal Provider\nport 8200]
-        VB[vault-b-server\nPrimary Secrets Store\nport 8200]
-        VB -->|transit auto-unseal\nhttp://vault-a-server:8200| VA
+        V[vault-server\nSingle Vault\nShamir Seal\nport 8200]
     end
 
-    subgraph Volumes
-        VA --> VAF[./vault-a/file\nraft storage]
-        VB --> VBF[./vault-b/file\nraft storage]
+    subgraph Storage
+        V --> VF[./vault/file\nfile storage]
+    end
+
+    subgraph Key Management
+        AV[Ansible Vault\nencrypted file\nvault_keys.yml] --> AP
     end
 ```
 
@@ -29,17 +36,15 @@ graph TB
 
 ## Prerequisites
 
-- **Docker Engine 24+** with Docker Compose v2+
-- **Minimum RAM:** 512 MB (256 MB per vault instance)
-- **Linux** (Ubuntu 22.04+, Debian 12+) or macOS with Docker Desktop
+| Requirement | Minimum Version | Check |
+|-------------|----------------|-------|
+| Docker Engine | 24.0+ | `docker --version` |
+| Docker Compose | v2.0+ | `docker compose version` |
+| ansible-core | 2.15+ | `ansible --version` |
 
 ---
 
 ## Quick Start
-
-**First time only** — follow the full initialization sequence in [docs/first-time-setup.md](docs/first-time-setup.md).
-
-For subsequent starts:
 
 1. **Clone the repository:**
    ```bash
@@ -47,27 +52,33 @@ For subsequent starts:
    cd vault-transit-stack
    ```
 
-2. **Create and configure the environment file:**
+2. **Create the environment file:**
    ```bash
    cp .env.example .env
-   # Edit .env with your values
+   # Adjust HOST_UID and HOST_GID to match your user: id -u && id -g
    ```
 
 3. **Make scripts executable:**
    ```bash
-   chmod +x scripts/start.sh scripts/stop.sh vault-a/entrypoint.sh vault-b/entrypoint.sh
+   chmod +x scripts/start.sh scripts/stop.sh vault/entrypoint.sh
    ```
 
-4. **Start the stack:**
+4. **Start vault:**
    ```bash
    ./scripts/start.sh
    ```
 
-5. **Access the UIs:**
-   - Vault-a: [http://localhost:8282/ui](http://localhost:8282/ui)
-   - Vault-b: [http://localhost:8283/ui](http://localhost:8283/ui)
+5. **Initialize and configure auto-unseal:**
 
-> **First time?** See [docs/first-time-setup.md](docs/first-time-setup.md) for the complete initialization walkthrough, including transit engine configuration and vault-b setup.
+   See [docs/single-vault-setup.md](docs/single-vault-setup.md) for the complete
+   first-time initialization guide, including Ansible Vault key encryption and
+   unseal verification.
+
+---
+
+## First-Time Setup
+
+Full initialization walkthrough: [docs/single-vault-setup.md](docs/single-vault-setup.md)
 
 ---
 
@@ -75,8 +86,7 @@ For subsequent starts:
 
 | Service | Container | Host Port | Description |
 |---------|-----------|-----------|-------------|
-| vault-a | `vault-a-server` | `127.0.0.1:8282` | Transit unseal provider. Runs Vault with the transit secrets engine. Must be healthy before vault-b starts. |
-| vault-b | `vault-b-server` | `127.0.0.1:8283` | Primary secrets store. Auto-unseals via vault-a's transit engine on every restart. |
+| vault | `vault-server` | `127.0.0.1:8200` | Single Vault instance with Shamir seal and file storage. Starts sealed — unseal with Ansible playbook. |
 
 ---
 
@@ -86,24 +96,18 @@ For subsequent starts:
 |----------|---------|-------------|
 | `COMPOSE_PROJECT_NAME` | `vault-transit` | Docker Compose project name |
 | `NETWORK_NAME` | `vault-internal` | Internal Docker bridge network name |
-| `VAULT_TAG` | `1.15.4` | Vault image version (pin to a specific tag) |
+| `VAULT_TAG` | `1.15.4` | Vault image version (pin to specific tag) |
 | `HOST_UID` | `1000` | Host user ID for container file ownership |
 | `HOST_GID` | `1000` | Host group ID for container file ownership |
-| `VAULT_A_PORT` | `8282` | Host port for vault-a (bound to 127.0.0.1) |
-| `VAULT_B_PORT` | `8283` | Host port for vault-b (bound to 127.0.0.1) |
-| `VAULT_CONTAINER_LISTEN_PORT` | `8200` | Vault listener port inside containers |
-| `VAULT_INTERNAL_ADDR` | `http://127.0.0.1:8200` | vault-a self-reference for transit seal config |
-| `VAULT_ROOT_TOKEN_FOR_TRANSIT` | _(empty)_ | vault-a root token (used only in template.final) |
-| `VAULT_TRANSIT_KEY_NAME` | `autounseal` | Name of the transit key used for unsealing |
-| `VAULT_TRANSIT_MOUNT_PATH` | `transit/` | Mount path of the transit secrets engine |
-| `VAULT_KEY_SHARES` | `1` | Shamir key shares for vault operator init |
-| `VAULT_KEY_THRESHOLD` | `1` | Shamir key threshold for vault operator init |
-| `VAULT_A_UNSEAL_KEY` | _(empty)_ | vault-a Shamir unseal key — set after init |
-| `VAULT_B_TRANSIT_TOKEN` | _(empty)_ | vault-b transit token — set after transit setup |
-| `VAULT_A_MEM_LIMIT` | `256m` | Memory hard limit for vault-a container |
-| `VAULT_A_MEM_RESERVATION` | `128m` | Memory soft reservation for vault-a container |
-| `VAULT_B_MEM_LIMIT` | `256m` | Memory hard limit for vault-b container |
-| `VAULT_B_MEM_RESERVATION` | `128m` | Memory soft reservation for vault-b container |
+| `VAULT_PORT` | `8200` | Host port (bound to 127.0.0.1) |
+| `VAULT_CONTAINER_NAME` | `vault-server` | Container and hostname |
+| `VAULT_CONTAINER_LISTEN_PORT` | `8200` | Vault listener port inside container |
+| `VAULT_INTERNAL_ADDR` | `http://127.0.0.1:8200` | Vault API address for self-reference |
+| `VAULT_LOG_LEVEL` | `info` | Vault log verbosity (trace/debug/info/warn/error) |
+| `VAULT_KEY_SHARES` | `5` | Shamir key shares for `vault operator init` |
+| `VAULT_KEY_THRESHOLD` | `3` | Shamir threshold for `vault operator init` |
+| `VAULT_MEM_LIMIT` | `256m` | Memory hard limit for vault container |
+| `VAULT_MEM_RESERVATION` | `128m` | Memory soft reservation for vault container |
 
 ---
 
@@ -111,94 +115,105 @@ For subsequent starts:
 
 ```
 vault-transit-stack/
-├── .env                              # Secrets and local config (never commit)
+├── .env                              # Local config (gitignored — never commit)
 ├── .env.example                      # Environment variable template
-├── .gitignore                        # Excludes .env, runtime data, generated configs
-├── docker-compose.yml                # Service definitions for both vault instances
+├── .gitignore
+├── .gitattributes
+├── docker-compose.yml                # Single vault service definition
 ├── scripts/
-│   ├── start.sh                      # Startup script (--init flag for first-time setup)
-│   └── stop.sh                       # Clean shutdown script
-├── vault-a/
-│   ├── Dockerfile                    # vault-a image (hashicorp/vault + shadow)
-│   ├── entrypoint.sh                 # Starts vault, auto-unseals via VAULT_A_UNSEAL_KEY
+│   ├── start.sh                      # Build and start vault container
+│   └── stop.sh                       # Stop vault container
+├── vault/
+│   ├── Dockerfile                    # hashicorp/vault + shadow + gettext
+│   ├── entrypoint.sh                 # envsubst config template, exec vault server
 │   ├── config/
-│   │   ├── vault.hcl                 # Active config (static, no template substitution)
-│   │   ├── vault.hcl.template.init   # Reference template for initial setup phase
-│   │   ├── vault.hcl.template.final  # Reference template with transit seal stanza
-│   │   └── autounseal-policy.hcl     # HCL policy granting vault-b transit access
+│   │   ├── vault.hcl.template        # Config template (envsubst at runtime)
+│   │   └── vault.hcl                 # Generated at runtime (gitignored)
 │   ├── file/                         # Vault storage (gitignored, bind-mounted)
 │   └── logs/                         # Vault logs (gitignored, bind-mounted)
-├── vault-b/
-│   ├── Dockerfile                    # vault-b image (hashicorp/vault + shadow + gettext)
-│   ├── entrypoint.sh                 # Runs envsubst on template, starts vault
-│   ├── config/
-│   │   ├── config.hcl.template       # Config template with transit seal placeholders
-│   │   └── config.hcl                # Generated at runtime by entrypoint (gitignored)
-│   ├── file/                         # Vault storage (gitignored, bind-mounted)
-│   └── logs/                         # Vault logs (gitignored, bind-mounted)
+├── ansible/
+│   ├── ansible.cfg                   # Inventory path, retry disabled
+│   ├── inventory.yml                 # Default: local connection
+│   ├── vault-unseal.yml              # Auto-unseal playbook
+│   ├── README.md                     # Ansible setup and automation guide
+│   └── vars/
+│       ├── vault_keys.yml.example    # Unseal keys template (committed)
+│       └── vault_keys.yml            # Encrypted unseal keys (gitignored)
 └── docs/
-    ├── first-time-setup.md           # Step-by-step initialization walkthrough
-    ├── vault-architecture.md         # Architecture, diagrams, security notes
-    └── legacy-setup.md               # Original monolith README + migration notes
+    ├── single-vault-setup.md         # First-time initialization guide
+    └── legacy-transit/               # Archived dual-vault transit setup
+        ├── README.md                 # Archive context + when transit IS appropriate
+        ├── vault-a/                  # Transit unseal provider (archived)
+        ├── vault-b/                  # Transit-unsealed vault (archived)
+        ├── docker-compose.yml        # Dual-vault compose (archived)
+        ├── legacy-setup.md
+        ├── vault-architecture.md
+        └── first-time-setup.md
 ```
 
 ---
 
 ## Lifecycle Management
 
-### Start the stack
+### Start
 
 ```bash
-# Normal start (both vaults, requires prior initialization)
 ./scripts/start.sh
-
-# Init mode (vault-a only, for first-time setup)
-./scripts/start.sh --init
 ```
 
-### Stop the stack
+### Stop
 
 ```bash
 ./scripts/stop.sh
 # or: docker compose down
 ```
 
-Data in `vault-a/file/` and `vault-b/file/` is preserved.
+Data in `vault/file/` is preserved across restarts.
+
+### Unseal
+
+```bash
+cd ansible
+ansible-playbook vault-unseal.yml --ask-vault-pass
+```
+
+### Seal manually
+
+```bash
+docker exec vault-server vault operator seal
+```
 
 ### Reset all data (destructive)
 
 ```bash
 docker compose down
-rm -rf vault-a/file/* vault-b/file/*
+rm -rf vault/file/* vault/logs/*
 ```
 
-This forces re-initialization. Repeat the first-time setup.
+Forces re-initialization. Repeat the first-time setup guide.
 
 ### Update Vault version
 
 ```bash
-# Update VAULT_TAG in .env, then rebuild
+# Update VAULT_TAG in .env, then:
 ./scripts/start.sh
 ```
 
 ### View logs
 
 ```bash
-# All services
 docker compose logs -f
-
-# Single service
-docker compose logs -f vault-a
-docker compose logs -f vault-b
+docker compose logs -f vault
 ```
 
 ---
 
 ## Network Architecture
 
-Both vault instances run on the `vault-internal` Docker bridge network. Ports are bound to `127.0.0.1` only — they are not accessible from other machines on the network.
+Vault runs on the `vault-internal` Docker bridge network. The port binding
+`127.0.0.1:8200` restricts access to the local machine only.
 
-To connect an external application stack to vault-b:
+To connect an external application stack to vault:
 
 ```yaml
 # In your application's docker-compose.yml:
@@ -208,17 +223,25 @@ networks:
     name: vault-internal
 ```
 
-Then reference vault-b as `http://vault-b-server:8200` from within your application containers.
+Then reference vault as `http://vault-server:8200` from your application containers.
 
 ---
 
 ## Security Notes
 
-- **`.env` must never be committed.** It is excluded by `.gitignore`. Use `.env.example` as the reference.
-- **TLS is disabled** — suitable for localhost-only deployments. Enable TLS via the `listener` stanza before exposing vault to untrusted networks.
-- **Transit token scope:** `VAULT_B_TRANSIT_TOKEN` is restricted to `autounseal-policy.hcl` — it can only encrypt and decrypt the `autounseal` transit key. It has no access to any other vault-a data.
-- **Ports are localhost-only:** `127.0.0.1:8282` and `127.0.0.1:8283`. Do not change to `0.0.0.0` without enabling TLS and authentication.
-- **`IPC_LOCK` capability:** Added to prevent swap of sensitive memory. `disable_mlock = true` is set as a fallback for environments that cannot grant this capability.
+- **`.env` is gitignored** — never commit it. Use `.env.example` as the reference.
+- **Unseal keys are gitignored** — `ansible/vars/vault_keys.yml` is excluded.
+  Commit only the `.example` template.
+- **TLS is disabled** by default (`tls_disable = true`) — acceptable for
+  localhost-only deployments. Enable TLS via the `listener` stanza before
+  exposing Vault to untrusted networks.
+- **`IPC_LOCK` capability** prevents Vault's memory from being swapped to disk.
+  `disable_mlock = true` is set as a fallback for environments that cannot
+  grant this capability.
+- **Port is localhost-only:** `127.0.0.1:8200`. Do not change to `0.0.0.0`
+  without enabling TLS and network-level authentication.
+- **no_log: true** on unseal key submission tasks prevents key material from
+  appearing in Ansible output or log files.
 
 ---
 
@@ -226,6 +249,6 @@ Then reference vault-b as `http://vault-b-server:8200` from within your applicat
 
 | Document | Description |
 |----------|-------------|
-| [docs/first-time-setup.md](docs/first-time-setup.md) | Complete step-by-step initialization guide |
-| [docs/vault-architecture.md](docs/vault-architecture.md) | Architecture diagrams, component roles, security model |
-| [docs/legacy-setup.md](docs/legacy-setup.md) | Original monolith README and migration change log |
+| [docs/single-vault-setup.md](docs/single-vault-setup.md) | Complete first-time initialization guide |
+| [ansible/README.md](ansible/README.md) | Ansible setup, automation, and troubleshooting |
+| [docs/legacy-transit/README.md](docs/legacy-transit/README.md) | When transit auto-unseal is the right choice |

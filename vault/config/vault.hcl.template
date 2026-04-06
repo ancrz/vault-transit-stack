@@ -1,0 +1,16 @@
+storage "file" {
+  path = "/vault/file"
+}
+
+listener "tcp" {
+  address     = "0.0.0.0:${VAULT_CONTAINER_LISTEN_PORT}"
+  tls_disable = true
+}
+
+api_addr      = "http://0.0.0.0:${VAULT_CONTAINER_LISTEN_PORT}"
+ui            = true
+disable_mlock = true
+log_level     = "${VAULT_LOG_LEVEL}"
+
+default_lease_ttl = "24h"
+max_lease_ttl     = "72h"

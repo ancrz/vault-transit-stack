@@ -1,13 +1,13 @@
 #!/bin/bash
 # =============================================================================
-# Vault Transit Stack — Shutdown Script
+# Vault Stack — Shutdown Script
 # =============================================================================
 
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." &>/dev/null && pwd)"
 
-echo "--- Stopping Vault Transit Stack ---"
+echo "--- Stopping Vault Stack ---"
 cd "$PROJECT_DIR"
 docker compose down
-echo "--- All vault services stopped ---"
+echo "--- Vault stopped ---"

@@ -5,17 +5,15 @@ vault_keys.txt
 *_keys.txt
 
 # Runtime data (vault storage)
-vault-a/file/
-vault-b/file/
-
-# Logs
-vault-a/logs/
-vault-b/logs/
-*.log
+vault/file/
+vault/logs/
 
 # Generated config (created by entrypoint at runtime)
-vault-a/config/vault.hcl
-vault-b/config/config.hcl
+vault/config/vault.hcl
+
+# Ansible sensitive files
+ansible/vars/vault_keys.yml
+ansible/*.retry
 
 # OS
 .DS_Store
