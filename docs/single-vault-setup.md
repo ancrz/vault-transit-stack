@@ -1,7 +1,7 @@
 # Single Vault — First-Time Setup Guide
 
 This guide walks through initializing a fresh Vault instance and configuring
-the Ansible-managed auto-unseal for the single-vault stack.
+the sidecar-managed auto-unseal for the single-vault stack.
 
 ---
 
@@ -11,15 +11,6 @@ the Ansible-managed auto-unseal for the single-vault stack.
 |-------------|----------------|-------|
 | Docker Engine | 24.0+ | `docker --version` |
 | Docker Compose | v2.0+ | `docker compose version` |
-| ansible-core | 2.15+ | `ansible --version` |
-
-Install ansible-core if missing:
-
-```bash
-pip install ansible-core
-# or
-sudo apt install ansible
-```
 
 ---
 
@@ -107,13 +98,8 @@ before proceeding.
 
 ## Step 5: Configure Unseal Keys
 
-Choose one of the two unseal approaches below. The sidecar is recommended
-for normal operation; Ansible is available for troubleshooting.
-
-### Option A — Automatic (sidecar, recommended)
-
-The `vault-unsealer` sidecar polls the seal-status endpoint and applies keys
-automatically every time Vault starts sealed.
+The `vault-unsealer` sidecar is the primary unseal mechanism. It polls the
+seal-status endpoint and applies keys automatically every time Vault starts sealed.
 
 ```bash
 cd vault-unsealer/keys
@@ -143,40 +129,14 @@ chmod 600 vault-unsealer/keys/vault_keys.json
 Once the file is in place, restart the stack and the sidecar will auto-unseal
 within the next poll interval (default: 10 seconds).
 
-### Option B — Manual (Ansible, for troubleshooting)
-
-```bash
-cd ansible/vars
-cp vault_keys.yml.example vault_keys.yml
-```
-
-Edit `vault_keys.yml` and replace the placeholder values with 3 of the 5
-unseal keys from Step 3:
-
-```yaml
-vault_addr: "http://127.0.0.1:8200"
-
-vault_unseal_keys:
-  - "your-actual-unseal-key-1"
-  - "your-actual-unseal-key-2"
-  - "your-actual-unseal-key-3"
-```
-
-Encrypt the file with Ansible Vault:
-
-```bash
-ansible-vault encrypt vault_keys.yml
-# Enter and confirm a strong passphrase
-```
-
-The file is now safe to reference from the playbook. The plaintext keys are
-no longer accessible without the Ansible Vault passphrase.
+> **Alternative:** For manual or remote unsealing (e.g., headless hosts without
+> Docker, or operator-triggered unseal), an Ansible playbook is available in
+> [docs/ansible-alternative/](ansible-alternative/). It is not required for
+> normal operation.
 
 ---
 
 ## Step 6: Unseal Vault
-
-### If using the sidecar (Option A)
 
 The sidecar starts automatically with the stack and will unseal Vault within
 one poll interval. Confirm by watching logs:
@@ -191,19 +151,6 @@ Expected output when unsealing completes:
 [INFO]  Vault is sealed. Applying unseal keys (threshold: 3)...
 [INFO]  Vault unsealed successfully after 3 key(s).
 ```
-
-### If using Ansible (Option B)
-
-```bash
-cd ansible
-ansible-playbook vault-unseal.yml --ask-vault-pass
-```
-
-Enter the Ansible Vault passphrase when prompted. The playbook will:
-1. Query the seal status endpoint.
-2. Submit the threshold number of unseal keys.
-3. Verify the vault is unsealed.
-4. Report the final status.
 
 ---
 
@@ -224,27 +171,13 @@ from Step 3.
 
 ## Step 8: (Optional) Auto-Unseal on Reboot
 
-To automatically unseal after host reboots, set up a cron job or systemd
-timer. See `ansible/README.md` for full instructions.
+The sidecar handles unseal automatically on every `docker compose up`, including
+after host reboots when Docker is configured to start on boot (the default on
+most Linux distributions with Docker installed via the official package).
 
-**Quick cron setup:**
-
-```bash
-sudo crontab -e
-```
-
-Add:
-
-```
-@reboot sleep 15 && cd /path/to/vault-transit-stack/ansible && ansible-playbook vault-unseal.yml --vault-password-file ~/.vault_pass >> /var/log/vault-unseal.log 2>&1
-```
-
-Create the password file:
-
-```bash
-echo 'your-ansible-vault-passphrase' > ~/.vault_pass
-chmod 600 ~/.vault_pass
-```
+For remote or operator-triggered unseal via Ansible, see
+[docs/ansible-alternative/README.md](ansible-alternative/README.md) for cron
+and systemd timer instructions.
 
 ---
 
@@ -257,7 +190,7 @@ following breaking changes:
 |------|--------------|-------------|
 | Application vault container | `vault-b-server` | `vault-server` |
 | Application vault port | `8283` | `8200` |
-| Unseal method | Transit auto-unseal via vault-a | Ansible Shamir unseal |
+| Unseal method | Transit auto-unseal via vault-a | Sidecar Shamir unseal |
 | `.env` key shares | `VAULT_KEY_SHARES=1` | `VAULT_KEY_SHARES=5` |
 | Data directory | `./vault-b/file/` | `./vault/file/` |
 
@@ -275,7 +208,7 @@ export any secrets before decommissioning vault-b.
 | `VAULT_B_MEM_LIMIT` | `VAULT_MEM_LIMIT` |
 | `VAULT_B_MEM_RESERVATION` | `VAULT_MEM_RESERVATION` |
 | `VAULT_B_TRANSIT_TOKEN` | (removed — not applicable) |
-| `VAULT_A_UNSEAL_KEY` | (removed — managed by Ansible) |
+| `VAULT_A_UNSEAL_KEY` | (removed — managed by sidecar) |
 
 ---
 

@@ -1,9 +1,9 @@
 # Vault Transit Stack
 
-Single HashiCorp Vault with Shamir seal, managed by an Ansible-driven auto-unseal
-playbook. Vault runs as a single Docker container with file-based storage, bound
-to localhost only. Unseal keys are stored in an Ansible Vault-encrypted file and
-applied automatically via playbook after each container restart or host reboot.
+Single HashiCorp Vault with Shamir seal, unsealed automatically by a lightweight
+sidecar container. Vault runs as a single Docker container with file-based storage,
+bound to localhost only. The `vault-unsealer` sidecar polls the seal-status endpoint
+and applies keys whenever Vault starts sealed.
 
 The legacy dual-vault transit auto-unseal configuration is archived in
 [docs/legacy-transit/](docs/legacy-transit/) for reference.
@@ -16,7 +16,6 @@ The legacy dual-vault transit auto-unseal configuration is archived in
 graph TB
     subgraph Host
         OP[localhost:8200] --> V
-        AP[Ansible Playbook\nvault-unseal.yml] -->|Shamir unseal keys\nno_log: true| V
     end
 
     subgraph vault-internal network
@@ -29,7 +28,6 @@ graph TB
     end
 
     subgraph Key Management
-        AV[Ansible Vault\nencrypted file\nvault_keys.yml] --> AP
         JF[vault_keys.json\nplaintext JSON\ngitignored] --> VU
     end
 ```
@@ -42,7 +40,9 @@ graph TB
 |-------------|----------------|-------|
 | Docker Engine | 24.0+ | `docker --version` |
 | Docker Compose | v2.0+ | `docker compose version` |
-| ansible-core | 2.15+ | `ansible --version` |
+
+> For manual/remote unseal as an alternative, Ansible is available in
+> [docs/ansible-alternative/](docs/ansible-alternative/).
 
 ---
 
@@ -73,7 +73,7 @@ graph TB
 5. **Initialize and configure auto-unseal:**
 
    See [docs/single-vault-setup.md](docs/single-vault-setup.md) for the complete
-   first-time initialization guide, including Ansible Vault key encryption and
+   first-time initialization guide, including sidecar key configuration and
    unseal verification.
 
 ---
@@ -144,16 +144,16 @@ vault-transit-stack/
 │   └── keys/
 │       ├── vault_keys.json.example   # Key file template (committed)
 │       └── vault_keys.json           # Plaintext unseal keys (gitignored)
-├── ansible/
-│   ├── ansible.cfg                   # Inventory path, retry disabled
-│   ├── inventory.yml                 # Default: local connection
-│   ├── vault-unseal.yml              # Manual unseal playbook (troubleshooting)
-│   ├── README.md                     # Ansible setup and automation guide
-│   └── vars/
-│       ├── vault_keys.yml.example    # Unseal keys template (committed)
-│       └── vault_keys.yml            # Encrypted unseal keys (gitignored)
 └── docs/
     ├── single-vault-setup.md         # First-time initialization guide
+    ├── ansible-alternative/          # Manual/remote unseal (alternative)
+    │   ├── ansible.cfg               # Inventory path, retry disabled
+    │   ├── inventory.yml             # Default: local connection
+    │   ├── vault-unseal.yml          # Manual unseal playbook
+    │   ├── README.md                 # Ansible setup and automation guide
+    │   └── vars/
+    │       ├── vault_keys.yml.example  # Unseal keys template (committed)
+    │       └── vault_keys.yml          # Encrypted unseal keys (gitignored)
     └── legacy-transit/               # Archived dual-vault transit setup
         ├── README.md                 # Archive context + when transit IS appropriate
         ├── vault-a/                  # Transit unseal provider (archived)
@@ -189,12 +189,14 @@ Unsealing is automatic via the `vault-unsealer` sidecar. Once
 `vault-unsealer/keys/vault_keys.json` is populated and the stack is running,
 the sidecar detects the sealed state and applies keys on the next poll cycle.
 
-For manual unsealing (troubleshooting or one-off use):
+For manual unsealing as an alternative (remote hosts, troubleshooting):
 
 ```bash
-cd ansible
+cd docs/ansible-alternative
 ansible-playbook vault-unseal.yml --ask-vault-pass
 ```
+
+See [docs/ansible-alternative/README.md](docs/ansible-alternative/README.md) for setup.
 
 ### Seal manually
 
@@ -249,8 +251,9 @@ Then reference vault as `http://vault-server:8200` from your application contain
 ## Security Notes
 
 - **`.env` is gitignored** — never commit it. Use `.env.example` as the reference.
-- **Unseal keys are gitignored** — `ansible/vars/vault_keys.yml` is excluded.
-  Commit only the `.example` template.
+- **Unseal keys are gitignored** — `vault-unsealer/keys/vault_keys.json` and
+  `docs/ansible-alternative/vars/vault_keys.yml` are excluded.
+  Commit only the `.example` templates.
 - **TLS is disabled** by default (`tls_disable = true`) — acceptable for
   localhost-only deployments. Enable TLS via the `listener` stanza before
   exposing Vault to untrusted networks.
@@ -269,5 +272,5 @@ Then reference vault as `http://vault-server:8200` from your application contain
 | Document | Description |
 |----------|-------------|
 | [docs/single-vault-setup.md](docs/single-vault-setup.md) | Complete first-time initialization guide |
-| [ansible/README.md](ansible/README.md) | Ansible setup, automation, and troubleshooting |
+| [docs/ansible-alternative/README.md](docs/ansible-alternative/README.md) | Manual/remote unseal via Ansible (alternative) |
 | [docs/legacy-transit/README.md](docs/legacy-transit/README.md) | When transit auto-unseal is the right choice |

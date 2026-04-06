@@ -11,9 +11,9 @@ vault/logs/
 # Generated config (created by entrypoint at runtime)
 vault/config/vault.hcl
 
-# Ansible sensitive files
-ansible/vars/vault_keys.yml
-ansible/*.retry
+# Ansible sensitive files (alternative unseal — see docs/ansible-alternative/)
+docs/ansible-alternative/vars/vault_keys.yml
+docs/ansible-alternative/*.retry
 
 # Unsealer keys (plaintext JSON — operator creates from example)
 vault-unsealer/keys/vault_keys.json
