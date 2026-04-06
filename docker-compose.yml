@@ -59,9 +59,9 @@ services:
     environment:
       - VAULT_ADDR=http://${VAULT_CONTAINER_NAME:-vault-server}:${VAULT_CONTAINER_LISTEN_PORT:-8200}
       - POLL_INTERVAL=${UNSEALER_POLL_INTERVAL:-10}
-      - UNSEAL_KEYS_FILE=${UNSEALER_KEYS_FILE:-/run/secrets/vault_keys.json}
+      - UNSEAL_KEYS_FILE=${UNSEALER_KEYS_FILE:-/run/secrets/keys/vault_keys.json}
     volumes:
-      - ./vault-unsealer/keys/vault_keys.json:/run/secrets/vault_keys.json:ro
+      - ./vault-unsealer/keys:/run/secrets/keys:ro
     depends_on:
       vault:
         condition: service_started

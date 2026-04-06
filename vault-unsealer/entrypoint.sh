@@ -14,22 +14,30 @@ log_info()  { echo "[$(date -Iseconds)] [INFO]  $1"; }
 log_warn()  { echo "[$(date -Iseconds)] [WARN]  $1"; }
 log_error() { echo "[$(date -Iseconds)] [ERROR] $1"; }
 
-# Wait for vault to be reachable
-log_info "Vault unsealer starting. Target: ${VAULT_ADDR}"
-log_info "Poll interval: ${POLL_INTERVAL}s"
+log_info "Vault unsealer starting. Target: ${VAULT_ADDR}, poll: ${POLL_INTERVAL}s"
 
-# Validate keys file exists
-if [ ! -f "$UNSEAL_KEYS_FILE" ]; then
-    log_error "Unseal keys file not found: ${UNSEAL_KEYS_FILE}"
-    log_error "Create it from the example: vault-unsealer/keys/vault_keys.json.example"
-    exit 1
-fi
+# State tracking to avoid log spam
+LAST_STATE=""
 
 # Main loop
 while true; do
+    # Wait for keys file (first-time: operator creates after vault init)
+    if [ ! -f "$UNSEAL_KEYS_FILE" ]; then
+        if [ "$LAST_STATE" != "no_keys" ]; then
+            log_warn "Waiting for keys file: ${UNSEAL_KEYS_FILE}"
+            log_warn "After 'vault operator init', create from: vault-unsealer/keys/vault_keys.json.example"
+            LAST_STATE="no_keys"
+        fi
+        sleep "$POLL_INTERVAL"
+        continue
+    fi
+
     # Check seal status
     RESPONSE=$(curl -sf "${VAULT_ADDR}/v1/sys/seal-status" 2>/dev/null) || {
-        log_warn "Vault unreachable at ${VAULT_ADDR}. Retrying in ${POLL_INTERVAL}s..."
+        if [ "$LAST_STATE" != "unreachable" ]; then
+            log_warn "Vault unreachable at ${VAULT_ADDR}. Polling..."
+            LAST_STATE="unreachable"
+        fi
         sleep "$POLL_INTERVAL"
         continue
     }
@@ -40,13 +48,20 @@ while true; do
 
     # Not initialized — skip (requires manual operator init)
     if [ "$INITIALIZED" = "false" ]; then
-        log_warn "Vault not initialized. Manual init required. Retrying in ${POLL_INTERVAL}s..."
+        if [ "$LAST_STATE" != "not_init" ]; then
+            log_warn "Vault not initialized. Run: docker exec vault-server vault operator init"
+            LAST_STATE="not_init"
+        fi
         sleep "$POLL_INTERVAL"
         continue
     fi
 
     # Already unsealed — all good
     if [ "$SEALED" = "false" ]; then
+        if [ "$LAST_STATE" != "unsealed" ]; then
+            log_info "Vault is unsealed and operational."
+            LAST_STATE="unsealed"
+        fi
         sleep "$POLL_INTERVAL"
         continue
     fi
