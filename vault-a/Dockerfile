@@ -6,8 +6,8 @@ FROM hashicorp/vault:${VAULT_TAG}
 ARG UID_ARG=1000
 ARG GID_ARG=1000
 
-# Install shadow for full adduser/addgroup functionality
-RUN apk add --no-cache shadow
+# Install shadow for full adduser/addgroup functionality and gettext for envsubst
+RUN apk add --no-cache shadow gettext
 
 # Create a non-root user and group with specified UID/GID
 RUN if ! getent group vault > /dev/null; then \
@@ -20,7 +20,10 @@ RUN if ! getent group vault > /dev/null; then \
 # Set ownership of Vault's data directory
 RUN chown -R ${UID_ARG}:vault /vault/file
 
-# Copy configuration templates as reference (not used at runtime)
+# Copy active config template (envsubst resolves at runtime)
+COPY ./config/vault.hcl.template /vault/config/vault.hcl.template
+
+# Copy reference templates (not used at runtime)
 COPY ./config/vault.hcl.template.init /usr/local/bin/config_templates/vault.hcl.template.init
 COPY ./config/vault.hcl.template.final /usr/local/bin/config_templates/vault.hcl.template.final
 

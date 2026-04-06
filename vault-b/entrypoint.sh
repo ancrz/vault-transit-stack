@@ -2,7 +2,7 @@
 set -e
 
 # Substitute environment variables into config template
-envsubst '${VAULT_B_TRANSIT_TOKEN} ${VAULT_TRANSIT_KEY_NAME} ${VAULT_TRANSIT_MOUNT_PATH}' \
+envsubst '${VAULT_CONTAINER_LISTEN_PORT} ${VAULT_A_CONTAINER_NAME} ${VAULT_B_TRANSIT_TOKEN} ${VAULT_TRANSIT_KEY_NAME} ${VAULT_TRANSIT_MOUNT_PATH}' \
   < /vault/config/config.hcl.template \
   > /vault/config/vault.hcl
 

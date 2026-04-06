@@ -3,12 +3,12 @@ storage "file" {
 }
 
 listener "tcp" {
-  address     = "0.0.0.0:8200"
+  address     = "0.0.0.0:${VAULT_CONTAINER_LISTEN_PORT}"
   tls_disable = 1
 }
 
 seal "transit" {
-  address         = "http://vault-a-server:8200"
+  address         = "http://${VAULT_A_CONTAINER_NAME}:${VAULT_CONTAINER_LISTEN_PORT}"
   token           = "${VAULT_B_TRANSIT_TOKEN}"
   disable_renewal = "false"
   key_name        = "${VAULT_TRANSIT_KEY_NAME}"

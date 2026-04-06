@@ -1,5 +1,6 @@
 # Secrets
 .env
+.env.test
 vault_keys.txt
 *_keys.txt
 
@@ -13,6 +14,7 @@ vault-b/logs/
 *.log
 
 # Generated config (created by entrypoint at runtime)
+vault-a/config/vault.hcl
 vault-b/config/config.hcl
 
 # OS
