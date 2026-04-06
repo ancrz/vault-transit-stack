@@ -15,6 +15,9 @@ vault/config/vault.hcl
 ansible/vars/vault_keys.yml
 ansible/*.retry
 
+# Unsealer keys (plaintext JSON — operator creates from example)
+vault-unsealer/keys/vault_keys.json
+
 # OS
 .DS_Store
 Thumbs.db

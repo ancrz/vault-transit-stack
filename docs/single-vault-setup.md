@@ -105,7 +105,45 @@ before proceeding.
 
 ---
 
-## Step 5: Create Ansible Unseal Keys File
+## Step 5: Configure Unseal Keys
+
+Choose one of the two unseal approaches below. The sidecar is recommended
+for normal operation; Ansible is available for troubleshooting.
+
+### Option A — Automatic (sidecar, recommended)
+
+The `vault-unsealer` sidecar polls the seal-status endpoint and applies keys
+automatically every time Vault starts sealed.
+
+```bash
+cd vault-unsealer/keys
+cp vault_keys.json.example vault_keys.json
+```
+
+Edit `vault_keys.json` and replace the placeholder values with the threshold
+number of unseal keys from Step 3 (3 keys if using the default threshold=3):
+
+```json
+{
+  "vault_unseal_keys": [
+    "your-actual-unseal-key-1",
+    "your-actual-unseal-key-2",
+    "your-actual-unseal-key-3"
+  ]
+}
+```
+
+**Security note:** `vault_keys.json` is gitignored and stored in plaintext.
+Restrict file permissions and keep it on a trusted host only:
+
+```bash
+chmod 600 vault-unsealer/keys/vault_keys.json
+```
+
+Once the file is in place, restart the stack and the sidecar will auto-unseal
+within the next poll interval (default: 10 seconds).
+
+### Option B — Manual (Ansible, for troubleshooting)
 
 ```bash
 cd ansible/vars
@@ -137,6 +175,24 @@ no longer accessible without the Ansible Vault passphrase.
 ---
 
 ## Step 6: Unseal Vault
+
+### If using the sidecar (Option A)
+
+The sidecar starts automatically with the stack and will unseal Vault within
+one poll interval. Confirm by watching logs:
+
+```bash
+docker compose logs -f vault-unsealer
+```
+
+Expected output when unsealing completes:
+
+```
+[INFO]  Vault is sealed. Applying unseal keys (threshold: 3)...
+[INFO]  Vault unsealed successfully after 3 key(s).
+```
+
+### If using Ansible (Option B)
 
 ```bash
 cd ansible

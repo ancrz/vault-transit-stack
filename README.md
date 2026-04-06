@@ -21,6 +21,7 @@ graph TB
 
     subgraph vault-internal network
         V[vault-server\nSingle Vault\nShamir Seal\nport 8200]
+        VU[vault-unsealer\nSidecar\npolls seal-status\nauto-unseals] -->|unseal keys\nvia HTTP API| V
     end
 
     subgraph Storage
@@ -29,6 +30,7 @@ graph TB
 
     subgraph Key Management
         AV[Ansible Vault\nencrypted file\nvault_keys.yml] --> AP
+        JF[vault_keys.json\nplaintext JSON\ngitignored] --> VU
     end
 ```
 
@@ -86,7 +88,8 @@ Full initialization walkthrough: [docs/single-vault-setup.md](docs/single-vault-
 
 | Service | Container | Host Port | Description |
 |---------|-----------|-----------|-------------|
-| vault | `vault-server` | `127.0.0.1:8200` | Single Vault instance with Shamir seal and file storage. Starts sealed — unseal with Ansible playbook. |
+| vault | `vault-server` | `127.0.0.1:8200` | Single Vault instance with Shamir seal and file storage. Starts sealed — unsealed automatically by the sidecar. |
+| vault-unsealer | `vault-server-unsealer` | — | Lightweight sidecar (Alpine + curl + jq). Polls `/v1/sys/seal-status` every N seconds and applies unseal keys when sealed. |
 
 ---
 
@@ -108,6 +111,10 @@ Full initialization walkthrough: [docs/single-vault-setup.md](docs/single-vault-
 | `VAULT_KEY_THRESHOLD` | `3` | Shamir threshold for `vault operator init` |
 | `VAULT_MEM_LIMIT` | `256m` | Memory hard limit for vault container |
 | `VAULT_MEM_RESERVATION` | `128m` | Memory soft reservation for vault container |
+| `UNSEALER_POLL_INTERVAL` | `10` | Seconds between seal-status checks by the sidecar |
+| `UNSEALER_KEYS_FILE` | `/run/secrets/vault_keys.json` | Path inside sidecar container to the unseal keys file |
+| `UNSEALER_MEM_LIMIT` | `64m` | Memory hard limit for the unsealer sidecar |
+| `UNSEALER_MEM_RESERVATION` | `32m` | Memory soft reservation for the unsealer sidecar |
 
 ---
 
@@ -119,7 +126,7 @@ vault-transit-stack/
 ├── .env.example                      # Environment variable template
 ├── .gitignore
 ├── .gitattributes
-├── docker-compose.yml                # Single vault service definition
+├── docker-compose.yml                # Vault + unsealer sidecar service definitions
 ├── scripts/
 │   ├── start.sh                      # Build and start vault container
 │   └── stop.sh                       # Stop vault container
@@ -131,10 +138,16 @@ vault-transit-stack/
 │   │   └── vault.hcl                 # Generated at runtime (gitignored)
 │   ├── file/                         # Vault storage (gitignored, bind-mounted)
 │   └── logs/                         # Vault logs (gitignored, bind-mounted)
+├── vault-unsealer/
+│   ├── Dockerfile                    # Alpine + curl + jq
+│   ├── entrypoint.sh                 # Poll-and-unseal loop
+│   └── keys/
+│       ├── vault_keys.json.example   # Key file template (committed)
+│       └── vault_keys.json           # Plaintext unseal keys (gitignored)
 ├── ansible/
 │   ├── ansible.cfg                   # Inventory path, retry disabled
 │   ├── inventory.yml                 # Default: local connection
-│   ├── vault-unseal.yml              # Auto-unseal playbook
+│   ├── vault-unseal.yml              # Manual unseal playbook (troubleshooting)
 │   ├── README.md                     # Ansible setup and automation guide
 │   └── vars/
 │       ├── vault_keys.yml.example    # Unseal keys template (committed)
@@ -171,6 +184,12 @@ vault-transit-stack/
 Data in `vault/file/` is preserved across restarts.
 
 ### Unseal
+
+Unsealing is automatic via the `vault-unsealer` sidecar. Once
+`vault-unsealer/keys/vault_keys.json` is populated and the stack is running,
+the sidecar detects the sealed state and applies keys on the next poll cycle.
+
+For manual unsealing (troubleshooting or one-off use):
 
 ```bash
 cd ansible

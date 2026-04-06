@@ -50,6 +50,32 @@ services:
         reservations:
           memory: ${VAULT_MEM_RESERVATION:-128m}
 
+  vault-unsealer:
+    build:
+      context: ./vault-unsealer
+      dockerfile: Dockerfile
+    container_name: ${VAULT_CONTAINER_NAME:-vault-server}-unsealer
+    hostname: ${VAULT_CONTAINER_NAME:-vault-server}-unsealer
+    environment:
+      - VAULT_ADDR=http://${VAULT_CONTAINER_NAME:-vault-server}:${VAULT_CONTAINER_LISTEN_PORT:-8200}
+      - POLL_INTERVAL=${UNSEALER_POLL_INTERVAL:-10}
+      - UNSEAL_KEYS_FILE=${UNSEALER_KEYS_FILE:-/run/secrets/vault_keys.json}
+    volumes:
+      - ./vault-unsealer/keys/vault_keys.json:/run/secrets/vault_keys.json:ro
+    depends_on:
+      vault:
+        condition: service_started
+    networks:
+      - vault-internal
+    restart: unless-stopped
+    logging: *logging
+    deploy:
+      resources:
+        limits:
+          memory: ${UNSEALER_MEM_LIMIT:-64m}
+        reservations:
+          memory: ${UNSEALER_MEM_RESERVATION:-32m}
+
 networks:
   vault-internal:
     name: ${NETWORK_NAME:-vault-internal}
