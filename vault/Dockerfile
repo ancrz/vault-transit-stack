@@ -17,11 +17,11 @@ RUN if ! getent group vault > /dev/null; then \
 RUN chown -R ${UID_ARG}:vault /vault/file
 
 COPY ./config/vault.hcl.template /vault/config/vault.hcl.template
+COPY ./entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
 
 USER ${UID_ARG}:${GID_ARG}
 
 EXPOSE 8200
 
-COPY ./entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
 ENTRYPOINT ["entrypoint.sh"]
