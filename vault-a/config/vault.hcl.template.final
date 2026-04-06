@@ -1,0 +1,22 @@
+storage "file" {
+  path = "/vault/file"
+}
+
+listener "tcp" {
+  address = "0.0.0.0:${VAULT_CONTAINER_LISTEN_PORT}"
+  tls_disable = true
+}
+
+api_addr = "http://0.0.0.0:${VAULT_CONTAINER_LISTEN_PORT}"
+ui = true
+disable_mlock = true
+log_level = "DEBUG"
+default_lease_ttl = "24h"
+max_lease_ttl = "72h"
+
+seal "transit" {
+  address = "${VAULT_INTERNAL_ADDR}"
+  token = "${VAULT_ROOT_TOKEN_FOR_TRANSIT}"
+  key_name = "${VAULT_TRANSIT_KEY_NAME}"
+  mount_path = "${VAULT_TRANSIT_MOUNT_PATH}"
+}

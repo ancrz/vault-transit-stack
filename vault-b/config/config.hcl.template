@@ -1,0 +1,19 @@
+storage "file" {
+  path = "/vault/file"
+}
+
+listener "tcp" {
+  address     = "0.0.0.0:8200"
+  tls_disable = 1
+}
+
+seal "transit" {
+  address         = "http://vault-a-server:8200"
+  token           = "${VAULT_B_TRANSIT_TOKEN}"
+  disable_renewal = "false"
+  key_name        = "${VAULT_TRANSIT_KEY_NAME}"
+  mount_path      = "${VAULT_TRANSIT_MOUNT_PATH}"
+}
+
+ui = true
+disable_mlock = true

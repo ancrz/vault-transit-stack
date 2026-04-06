@@ -1,0 +1,27 @@
+# Secrets
+.env
+vault_keys.txt
+*_keys.txt
+
+# Runtime data (vault storage)
+vault-a/file/
+vault-b/file/
+
+# Logs
+vault-a/logs/
+vault-b/logs/
+*.log
+
+# Generated config (created by entrypoint at runtime)
+vault-b/config/config.hcl
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
