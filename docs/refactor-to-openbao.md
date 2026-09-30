@@ -1,6 +1,6 @@
 # Pending refactor: HashiCorp Vault → OpenBao
 
-Status: **pending** (noted 2026-09-30). Nothing in this stack has changed yet.
+Status: **pending** (noted 2026-09-30). Nothing in this stack has changed yet; the design already runs in vanguard-control.
 
 ## What
 
@@ -31,7 +31,9 @@ The CLI and HTTP API are the same (`bao` instead of `vault`; `/v1/...` paths unc
 
 ## Reference
 
-This design is being implemented first in **vanguard-control** (remediation R1: its own OpenBao with a mini KMS; mounts `vanguard-ai/` and `vanguard-automation/`; per-consumer AppRoles). Port it back here from there.
+Step-by-step port with diagrams: [openbao-refactor-guide.md](openbao-refactor-guide.md).
+
+This design is implemented in **vanguard-control** (remediation R1: its own OpenBao with a mini KMS; mounts `vanguard-ai/` and `vanguard-automation/`; per-consumer AppRoles). Port it back here from there.
 
 Sources:
 - [Vault BSL 1.1 license text](https://raw.githubusercontent.com/hashicorp/vault/main/LICENSE)
