@@ -12,6 +12,25 @@ its project-agnostic form.
 > disk and a sidecar polling loop are replaced by OpenBao (MPL 2.0), a KMS that holds the
 > unseal key, and an AppRole login on every start.
 
+## Purpose: an independent blueprint
+
+The stack is **decoupled from vanguard-control**: it builds, runs and is tested on its own, and
+no project is needed for it to work. It is kept as a protected, self-contained copy of the
+design (a failover for the code) and as a **blueprint to transplant** wherever a project needs
+a secret store with a security plus: no unseal shares held by people, no root token left
+behind, least privilege per consumer, network-bound credentials, verified plugins and an
+audit trail.
+
+| A project that needs… | Does |
+|---|---|
+| to keep API keys or passwords out of its database | declares a `kv-v2` mount and a reader / a write-only writer in `config/consumers.json` |
+| to sign tokens without holding the private key | declares a `transit` mount with an `ed25519` key |
+| a directory's service account rotated by the store | declares an `ldap` mount (the verified LDAP plugin) |
+| an agentic core | uses [sdk-agent-pipeline](https://github.com/ancrz/sdk-agent-pipeline): its default consumers here are exactly its gateway and writer |
+
+vanguard-control keeps its own copy of this design (with its mounts and consumers in the
+script); this repository is the configurable form. Nothing here imports it.
+
 ---
 
 ## Architecture
@@ -229,6 +248,22 @@ flowchart LR
 `secrets/` (the KMS unseal key, both recovery keys, the CA) and `data/main` + `data/kms`
 (raft storage). Losing `secrets/kms/unseal/kms-unseal-1.key` and the KMS data loses the main
 store's barrier key: keep them in a separate place from the data backups.
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause and fix |
+|---|---|
+| `openbao` loops on `waiting for the seal AppRole` | the store was never bootstrapped: `./scripts/init.sh` |
+| `seal AppRole login failed` | the seal `secret_id` expired or the KMS is down: `docker compose up -d openbao-kms`, then `./scripts/init.sh` (rotates it through the KMS break-glass) |
+| `the main store is still sealed` | the KMS is unreachable from `bao-kms-net`, or its unseal key file is missing: `docker compose logs openbao-kms` |
+| consumer login: `unauthorized by CIDR restrictions` | the consumer is not on `bao-secrets-net` (or the subnet changed: re-run `init.sh` after changing `BAO_SECRETS_SUBNET`) |
+| consumer: TLS name mismatch | it uses `https://openbao:8200`; use the alias `https://openbao-secrets:8200` (certificates issued before the alias are reissued by `certs.sh`) |
+| consumer: `permission denied` reading its files | add `group_add: ["${HOST_GID}"]` to the consumer (files are mode 640, the host group) |
+| `403 permission denied` on a path | its policy does not grant it: edit `config/policies/<policy>.hcl`, re-run `init.sh` |
+| `plugins.sh`: signature or sha256 mismatch | the download is not the pinned release; do not bypass it: check `PLUGIN_TAG`/`BINARY_SHA256` and the network |
+| `break-glass failed` | `secrets/*/init.json` (the recovery key) does not belong to this store's data: restore both from the same backup |
 
 ---
 
