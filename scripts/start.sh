@@ -1,60 +1,24 @@
-#!/bin/bash
-# =============================================================================
-# Vault Stack — Startup Script
-# =============================================================================
-# Usage:
-#   ./scripts/start.sh    Start vault service
-# =============================================================================
-
+#!/usr/bin/env bash
+# Start the stack. The first start bootstraps it (scripts/init.sh); later starts only bring the
+# containers up: the main store logs in to the KMS with its AppRole and unseals by itself.
 set -euo pipefail
-
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." &>/dev/null && pwd)"
-
-# --- Colors ---
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-RED='\033[0;31m'
-NC='\033[0m'
-
-log_info()  { echo -e "${GREEN}[INFO]${NC} $1"; }
-log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
-
-# --- Load environment variables ---
-if [ -f "$PROJECT_DIR/.env" ]; then
-    set -a
-    . "$PROJECT_DIR/.env"
-    set +a
-    log_info "Environment variables loaded from .env"
-else
-    log_error ".env file not found. Copy .env.example to .env first."
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${PROJECT_ROOT}"
+[ -f .env ] || { cp .env.example .env; echo "[start] created .env from .env.example"; }
+# .env fills only what the environment does not set (a variable on the command line wins).
+load_env() {
+  [ -f "$1" ] || return 0
+  local line key
+  while IFS= read -r line || [ -n "${line}" ]; do
+    [[ "${line}" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]] || continue
+    key=${BASH_REMATCH[1]}
+    [ -n "${!key+x}" ] || export "${key}=${BASH_REMATCH[2]}"
+  done < "$1"
+}
+load_env .env
+export HOST_UID="${HOST_UID:-$(id -u)}" HOST_GID="${HOST_GID:-$(id -g)}"
+if [ ! -s secrets/main/seal/secret_id ] || [ ! -s secrets/main/init.json ]; then
+  exec ./scripts/init.sh
 fi
-
-# --- Validate Docker ---
-if ! docker info > /dev/null 2>&1; then
-    log_error "Docker is not running or you lack permissions."
-fi
-
-# --- Validate required variables ---
-REQUIRED_VARS="VAULT_TAG VAULT_PORT HOST_UID HOST_GID"
-for var in $REQUIRED_VARS; do
-    if [ -z "${!var:-}" ]; then
-        log_error "Required variable $var is not defined in .env"
-    fi
-done
-
-# --- Start vault ---
-cd "$PROJECT_DIR"
-log_info "Starting Vault..."
-docker compose up -d --build
-
-# --- Summary ---
-log_info ""
-log_info "  Vault UI: http://localhost:${VAULT_PORT:-8200}/ui"
-log_info ""
-log_info "  Vault starts sealed. The unsealer sidecar will auto-unseal"
-log_info "  once vault_keys.json is configured."
-log_info ""
-log_info "  First time? See: docs/single-vault-setup.md"
-log_info ""
-log_info "Logs: docker compose logs -f"
+docker compose up -d --wait
+./scripts/status.sh

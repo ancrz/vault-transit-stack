@@ -1,13 +1,5 @@
-#!/bin/bash
-# =============================================================================
-# Vault Stack — Shutdown Script
-# =============================================================================
-
+#!/usr/bin/env bash
+# Stop the stack. Data (data/) and secrets (secrets/) are kept; the next start auto-unseals.
 set -euo pipefail
-
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." &>/dev/null && pwd)"
-
-echo "--- Stopping Vault Stack ---"
-cd "$PROJECT_DIR"
-docker compose down
-echo "--- Vault stopped ---"
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+docker compose down "$@"

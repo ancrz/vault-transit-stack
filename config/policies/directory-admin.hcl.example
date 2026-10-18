@@ -1,0 +1,8 @@
+# Example for an LDAP secrets engine mount (type "ldap" in config/consumers.json), as
+# vanguard-control's API uses it: configure the engine and its static roles, read only the
+# current credential OpenBao rotates. Copy to <name>.hcl, replace "directory" with the mount.
+path "directory/config"          { capabilities = ["create", "update"] }
+path "directory/static-role/*"   { capabilities = ["create", "update", "read", "delete", "list"] }
+path "directory/static-cred/*"   { capabilities = ["read"] }
+path "directory/rotate-root"     { capabilities = ["update"] }
+path "directory/rotate-role/*"   { capabilities = ["update"] }
