@@ -1,0 +1,10 @@
+{
+  "_comment": "Applied by scripts/init.sh on every run (idempotent). mounts: kv-v2, transit (with keys) or ldap (the LDAP secrets plugin; one mount per directory, see config/policies/directory-admin.hcl.example). consumers: one AppRole each, bound to the secrets subnet; credentials are written to secrets/consumers/<name>/. A policy name refers to config/policies/<name>.hcl. Removing an entry here does not delete it from the store.",
+  "mounts": [
+    { "path": "agent-ai", "type": "kv-v2", "description": "Model provider keys (read by the agent engine's model gateway)" }
+  ],
+  "consumers": {
+    "gateway": { "policies": ["agent-gateway"], "token_ttl": "1h", "token_max_ttl": "4h" },
+    "writer":  { "policies": ["agent-writer"],  "token_ttl": "1h", "token_max_ttl": "4h" }
+  }
+}

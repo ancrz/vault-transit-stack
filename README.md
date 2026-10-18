@@ -1,276 +1,292 @@
 # Vault Transit Stack
 
-Single HashiCorp Vault with Shamir seal, unsealed automatically by a lightweight
-sidecar container. Vault runs as a single Docker container with file-based storage,
-bound to localhost only. The `vault-unsealer` sidecar polls the seal-status endpoint
-and applies keys whenever Vault starts sealed.
+**OpenBao with a transit mini KMS**: a secret store that unseals itself, with nobody holding
+Shamir shares, and that other projects plug into as a module. Extracted from
+[vanguard-control](https://github.com/ancrz/vanguard-control), where the design was built
+and hardened (remediation R1, the seal AppRole, the LDAP secrets plugin); this repository is
+its project-agnostic form.
 
-The legacy dual-vault transit auto-unseal configuration is archived in
-[docs/legacy-transit/](docs/legacy-transit/) for reference.
+> **What changed.** Earlier versions ran HashiCorp Vault 1.15 with a sidecar that read
+> plaintext Shamir keys from a JSON file, plus an archived dual-Vault transit setup. Both are
+> gone (see git history before `feat!: replace Vault`): Vault's BSL licence, plaintext keys on
+> disk and a sidecar polling loop are replaced by OpenBao (MPL 2.0), a KMS that holds the
+> unseal key, and an AppRole login on every start.
 
 ---
 
 ## Architecture
 
 ```mermaid
-graph TB
-    subgraph Host
-        OP[localhost:8200] --> V
+flowchart LR
+    subgraph HOST["Host (operator)"]
+        INIT["scripts/init.sh<br/>bootstrap · reconfigure · rotate"]
+        KEY[("secrets/kms/unseal<br/>32-byte static key")]
+        REC[("secrets/*/init.json<br/>recovery keys")]
+        CRED[("secrets/consumers/&lt;name&gt;/<br/>role_id · secret_id · ca.crt")]
+        PLUG[("data/plugins<br/>LDAP plugin, verified")]
     end
 
-    subgraph vault-internal network
-        V[vault-server\nSingle Vault\nShamir Seal\nport 8200]
-        VU[vault-unsealer\nSidecar\npolls seal-status\nauto-unseals] -->|unseal keys\nvia HTTP API| V
+    subgraph KMSNET["bao-kms-net · internal · 172.30.48.0/24"]
+        KMS["openbao-kms<br/>transit engine only<br/>seal: static"]
     end
 
-    subgraph Storage
-        V --> VF[./vault/file\nfile storage]
+    subgraph SECNET["bao-secrets-net · internal · 172.30.30.0/24"]
+        BAO["openbao (alias openbao-secrets)<br/>KV v2 · transit · LDAP engine<br/>seal: transit"]
     end
 
-    subgraph Key Management
-        JF[vault_keys.json\nplaintext JSON\ngitignored] --> VU
+    subgraph CONSUMERS["Other stacks (external network)"]
+        GW["agent engine<br/>model-gateway: read agent-ai/"]
+        WR["admin / API<br/>writer: write-only"]
+        ANY["any app<br/>its own AppRole"]
     end
+
+    KEY -->|mounted only here| KMS
+    BAO -- "AppRole main-seal login at every start<br/>encrypt/decrypt the barrier key" --> KMS
+    PLUG -->|read-only| BAO
+    INIT -. "break-glass Unix sockets<br/>(no network)" .-> KMS
+    INIT -. "break-glass Unix sockets" .-> BAO
+    INIT --> CRED
+    INIT --> REC
+    CRED -->|mounted read-only| GW
+    CRED -->|mounted read-only| WR
+    GW -->|https://openbao-secrets:8200| BAO
+    WR -->|https://openbao-secrets:8200| BAO
+    ANY -->|https://openbao-secrets:8200| BAO
+```
+
+| Piece | What it is |
+|---|---|
+| `openbao-kms` | A transit-only OpenBao. It unseals itself with OpenBao's **static seal** from a key mounted only into it, and holds the key `transit/autounseal` that seals the main store. Production swaps it for a cloud KMS/HSM seal, or runs it on another host (a separate trust domain). |
+| `openbao` | The main store. **Transit seal** against the KMS: it unseals at every start without people. Mounts, policies and AppRoles come from `config/consumers.json` and `config/policies/`. |
+| `main-seal` AppRole | The main store's seal credential on the KMS. Not a static token: the container logs in at every start (OpenBao Agent's auto-auth pattern) and the seal renews the token while it runs, so a stop of any length never leaves it without one. Bound to the KMS subnet; its `secret_id` lives a year and is rotated 30 days ahead. |
+| Consumer AppRoles | One per entry in `consumers.json`, bound to the secrets subnet (token and `secret_id`). Credentials land in `secrets/consumers/<name>/` (dir 750, files 640, host group). Consumers re-read `secret_id` at each login, so rotation needs no restart. |
+| Break-glass | A Unix socket per store (`data/run`, `data/kms-run`, mode 700), never on a network. Since OpenBao 2.5.3 the unauthenticated generate-root endpoints are off by default; these sockets are the one place they stay on, so the recovery key can mint a short-lived root token. `init.sh` uses it on every re-run and revokes it, plus any stray root token. |
+| External plugins | OpenBao has no egress. `scripts/plugins.sh` fetches the official LDAP secrets plugin, checks the release checksum, **OpenBao's GPG release key** (fingerprint pinned) and a **pinned sha256**; `bao.hcl` declares the same sha256 and OpenBao checks it again before it runs. |
+| Audit | A file audit device declared in each config (secrets HMAC-hashed); a device in the config cannot be disabled through the API. |
+
+Both containers are hardened: non-root (`HOST_UID:HOST_GID`), read-only root filesystem,
+`cap_drop: ALL`, `no-new-privileges`, internal networks only, **no host ports**, TLS 1.2+ with
+a local CA, json-file logs with rotation.
+
+---
+
+## The unseal pipeline
+
+What `scripts/init.sh` does. It is idempotent: the first run bootstraps, every later run
+reconfigures and rotates, and only does what is missing.
+
+```mermaid
+flowchart TD
+    A([init.sh]) --> P["0 · plugins.sh<br/>fetch LDAP plugin → checksum → GPG → sha256"]
+    P --> C["certs.sh<br/>local CA · openbao (+openbao-secrets) · openbao-kms"]
+    C --> K{KMS initialised?}
+    K -- no --> K1["static-seal key (32 random bytes)<br/>operator init: 1 recovery key<br/>transit/keys/autounseal<br/>policy autounseal: encrypt/decrypt only"]
+    K -- yes --> K2["break-glass on the KMS socket<br/>short-lived root token"]
+    K1 --> S["AppRole main-seal<br/>bound to bao-kms-net<br/>rotate secret_id if &lt; 30 days left"]
+    K2 --> S
+    S --> R1["revoke stray roots · revoke own root"]
+    R1 --> M{Main store initialised?}
+    M -- no --> M1["start openbao: AppRole login to the KMS<br/>→ transit seal → unsealed<br/>operator init: 1 recovery key"]
+    M -- yes --> M2["wait unsealed<br/>break-glass on the main socket"]
+    M1 --> L["LDAP plugin registered?<br/>(else reload bao.hcl once)"]
+    M2 --> L
+    L --> CFG["consumers.json → mounts kv-v2 / transit+keys / ldap<br/>policies/*.hcl → policies<br/>one AppRole per consumer, bound to bao-secrets-net"]
+    CFG --> W["secrets/consumers/&lt;name&gt;/<br/>role_id · secret_id (rotated) · ca.crt"]
+    W --> E["revoke stray roots · revoke own root<br/>drop root_token from init.json"]
+    E --> Z([done: no root token exists])
+```
+
+A normal start after that is only `docker compose up`:
+
+```mermaid
+sequenceDiagram
+    participant D as Docker
+    participant K as openbao-kms
+    participant B as openbao
+    participant C as consumer
+    D->>K: start (static seal: key file) → unsealed
+    D->>B: start once KMS is healthy
+    B->>K: auth/approle/login (role_id, secret_id from secrets/main/seal)
+    K-->>B: periodic token (policy autounseal)
+    B->>K: transit/decrypt/autounseal (barrier key)
+    Note over B: unsealed, no human involved
+    C->>B: auth/approle/login (its role_id, secret_id) from 172.30.30.0/24
+    B-->>C: token: 1h, max 4h, its policies only
+    C->>B: read / write within its policy
 ```
 
 ---
 
 ## Prerequisites
 
-| Requirement | Minimum Version | Check |
-|-------------|----------------|-------|
-| Docker Engine | 24.0+ | `docker --version` |
-| Docker Compose | v2.0+ | `docker compose version` |
-
-> For manual/remote unseal as an alternative, Ansible is available in
-> [docs/ansible-alternative/](docs/ansible-alternative/).
-
----
-
-## Quick Start
-
-1. **Clone the repository:**
-   ```bash
-   git clone <REPOSITORY_URL>
-   cd vault-transit-stack
-   ```
-
-2. **Create the environment file:**
-   ```bash
-   cp .env.example .env
-   # Adjust HOST_UID and HOST_GID to match your user: id -u && id -g
-   ```
-
-3. **Make scripts executable:**
-   ```bash
-   chmod +x scripts/start.sh scripts/stop.sh vault/entrypoint.sh
-   ```
-
-4. **Start vault:**
-   ```bash
-   ./scripts/start.sh
-   ```
-
-5. **Initialize and configure auto-unseal:**
-
-   See [docs/single-vault-setup.md](docs/single-vault-setup.md) for the complete
-   first-time initialization guide, including sidecar key configuration and
-   unseal verification.
+| Requirement | Check |
+|---|---|
+| Docker Engine 24+ with Compose v2 | `docker compose version` |
+| `jq`, `openssl`, `python3`, `curl` on the host | used by `init.sh`, `certs.sh`, `plugins.sh` |
+| `gpg` (recommended) | without it the plugin's release signature is skipped with a warning; the pinned sha256 still decides |
+| Internet on the host for the first `init.sh` | to fetch the plugin release (OpenBao itself never has egress) |
 
 ---
 
-## First-Time Setup
+## Quick start
 
-Full initialization walkthrough: [docs/single-vault-setup.md](docs/single-vault-setup.md)
-
----
-
-## Services
-
-| Service | Container | Host Port | Description |
-|---------|-----------|-----------|-------------|
-| vault | `vault-server` | `127.0.0.1:8200` | Single Vault instance with Shamir seal and file storage. Starts sealed — unsealed automatically by the sidecar. |
-| vault-unsealer | `vault-server-unsealer` | — | Lightweight sidecar (Alpine + curl + jq). Polls `/v1/sys/seal-status` every N seconds and applies unseal keys when sealed. |
-
----
-
-## Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `COMPOSE_PROJECT_NAME` | `vault-transit` | Docker Compose project name |
-| `NETWORK_NAME` | `vault-internal` | Internal Docker bridge network name |
-| `VAULT_TAG` | `1.15.4` | Vault image version (pin to specific tag) |
-| `HOST_UID` | `1000` | Host user ID for container file ownership |
-| `HOST_GID` | `1000` | Host group ID for container file ownership |
-| `VAULT_PORT` | `8200` | Host port (bound to 127.0.0.1) |
-| `VAULT_CONTAINER_NAME` | `vault-server` | Container and hostname |
-| `VAULT_CONTAINER_LISTEN_PORT` | `8200` | Vault listener port inside container |
-| `VAULT_INTERNAL_ADDR` | `http://127.0.0.1:8200` | Vault API address for self-reference |
-| `VAULT_LOG_LEVEL` | `info` | Vault log verbosity (trace/debug/info/warn/error) |
-| `VAULT_KEY_SHARES` | `5` | Shamir key shares for `vault operator init` |
-| `VAULT_KEY_THRESHOLD` | `3` | Shamir threshold for `vault operator init` |
-| `VAULT_MEM_LIMIT` | `256m` | Memory hard limit for vault container |
-| `VAULT_MEM_RESERVATION` | `128m` | Memory soft reservation for vault container |
-| `UNSEALER_POLL_INTERVAL` | `10` | Seconds between seal-status checks by the sidecar |
-| `UNSEALER_KEYS_FILE` | `/run/secrets/vault_keys.json` | Path inside sidecar container to the unseal keys file |
-| `UNSEALER_MEM_LIMIT` | `64m` | Memory hard limit for the unsealer sidecar |
-| `UNSEALER_MEM_RESERVATION` | `32m` | Memory soft reservation for the unsealer sidecar |
-
----
-
-## File Structure
-
+```bash
+git clone https://github.com/ancrz/vault-transit-stack.git
+cd vault-transit-stack
+./scripts/start.sh        # first run: creates .env, bootstraps everything (≈30 s)
+./scripts/status.sh       # both stores: initialized=true sealed=false; TLS days left
 ```
-vault-transit-stack/
-├── .env                              # Local config (gitignored — never commit)
-├── .env.example                      # Environment variable template
-├── .gitignore
-├── .gitattributes
-├── docker-compose.yml                # Vault + unsealer sidecar service definitions
-├── scripts/
-│   ├── start.sh                      # Build and start vault container
-│   └── stop.sh                       # Stop vault container
-├── vault/
-│   ├── Dockerfile                    # hashicorp/vault + shadow + gettext
-│   ├── entrypoint.sh                 # envsubst config template, exec vault server
-│   ├── config/
-│   │   ├── vault.hcl.template        # Config template (envsubst at runtime)
-│   │   └── vault.hcl                 # Generated at runtime (gitignored)
-│   ├── file/                         # Vault storage (gitignored, bind-mounted)
-│   └── logs/                         # Vault logs (gitignored, bind-mounted)
-├── vault-unsealer/
-│   ├── Dockerfile                    # Alpine + curl + jq
-│   ├── entrypoint.sh                 # Poll-and-unseal loop
-│   └── keys/
-│       ├── vault_keys.json.example   # Key file template (committed)
-│       └── vault_keys.json           # Plaintext unseal keys (gitignored)
-└── docs/
-    ├── single-vault-setup.md         # First-time initialization guide
-    ├── ansible-alternative/          # Manual/remote unseal (alternative)
-    │   ├── ansible.cfg               # Inventory path, retry disabled
-    │   ├── inventory.yml             # Default: local connection
-    │   ├── vault-unseal.yml          # Manual unseal playbook
-    │   ├── README.md                 # Ansible setup and automation guide
-    │   └── vars/
-    │       ├── vault_keys.yml.example  # Unseal keys template (committed)
-    │       └── vault_keys.yml          # Encrypted unseal keys (gitignored)
-    └── legacy-transit/               # Archived dual-vault transit setup
-        ├── README.md                 # Archive context + when transit IS appropriate
-        ├── vault-a/                  # Transit unseal provider (archived)
-        ├── vault-b/                  # Transit-unsealed vault (archived)
-        ├── docker-compose.yml        # Dual-vault compose (archived)
-        ├── legacy-setup.md
-        ├── vault-architecture.md
-        └── first-time-setup.md
+
+Expected end of the first run:
+
+```text
+[openbao] main store initialised and auto-unsealed through the KMS
+[openbao] mount agent-ai/ (kv-v2) enabled
+[openbao] gateway: new secret_id (valid 8760h; the old one was missing)
+[openbao] writer: new secret_id (valid 8760h; the old one was missing)
+[openbao] main store configured: mounts [agent-ai], AppRoles [gateway, writer]; root token revoked
 ```
 
 ---
 
-## Lifecycle Management
+## Declaring consumers
 
-### Start
+`config/consumers.json` is the whole contract. The default declares what the
+[agent engine](https://github.com/ancrz/sdk-agent-pipeline) needs:
 
-```bash
-./scripts/start.sh
+```json
+{
+  "mounts": [
+    { "path": "agent-ai", "type": "kv-v2", "description": "Model provider keys" }
+  ],
+  "consumers": {
+    "gateway": { "policies": ["agent-gateway"], "token_ttl": "1h", "token_max_ttl": "4h" },
+    "writer":  { "policies": ["agent-writer"],  "token_ttl": "1h", "token_max_ttl": "4h" }
+  }
+}
 ```
 
-### Stop
+| Field | Values |
+|---|---|
+| `mounts[].type` | `kv-v2` · `transit` (with `"keys": [{"name": "jwt", "type": "ed25519"}]`) · `ldap` (the LDAP secrets plugin; one mount per directory) |
+| `consumers.<name>.policies` | names of `config/policies/<policy>.hcl` |
+| `token_ttl`, `token_max_ttl` | AppRole token lifetimes (default `1h`, `4h`) |
 
-```bash
-./scripts/stop.sh
-# or: docker compose down
-```
+Policies shipped: `agent-gateway.hcl` (read `agent-ai/data/*`), `agent-writer.hcl` (create and
+update, metadata read/delete/list, **never read a value**), and
+`directory-admin.hcl.example` for an `ldap` mount (configure the engine, read only the
+credential OpenBao rotates). Edit, then re-run `./scripts/init.sh`. Removing an entry does not
+delete it from the store.
 
-Data in `vault/file/` is preserved across restarts.
-
-### Unseal
-
-Unsealing is automatic via the `vault-unsealer` sidecar. Once
-`vault-unsealer/keys/vault_keys.json` is populated and the stack is running,
-the sidecar detects the sealed state and applies keys on the next poll cycle.
-
-For manual unsealing as an alternative (remote hosts, troubleshooting):
-
-```bash
-cd docs/ansible-alternative
-ansible-playbook vault-unseal.yml --ask-vault-pass
-```
-
-See [docs/ansible-alternative/README.md](docs/ansible-alternative/README.md) for setup.
-
-### Seal manually
-
-```bash
-docker exec vault-server vault operator seal
-```
-
-### Reset all data (destructive)
-
-```bash
-docker compose down
-rm -rf vault/file/* vault/logs/*
-```
-
-Forces re-initialization. Repeat the first-time setup guide.
-
-### Update Vault version
-
-```bash
-# Update VAULT_TAG in .env, then:
-./scripts/start.sh
-```
-
-### View logs
-
-```bash
-docker compose logs -f
-docker compose logs -f vault
-```
-
----
-
-## Network Architecture
-
-Vault runs on the `vault-internal` Docker bridge network. The port binding
-`127.0.0.1:8200` restricts access to the local machine only.
-
-To connect an external application stack to vault:
+### Connecting a project
 
 ```yaml
-# In your application's docker-compose.yml:
+# In the consumer's docker-compose.yml
+services:
+  my-app:
+    group_add: ["${HOST_GID:-1000}"]          # reads its AppRole files (mode 640)
+    networks: [bao-secrets]
+    volumes:
+      - ${VAULT_STACK_DIR}/secrets/consumers/my-app:/run/openbao:ro
+    environment:
+      BAO_ADDR: https://openbao-secrets:8200   # the alias, never "openbao"
 networks:
-  vault-internal:
+  bao-secrets:
     external: true
-    name: vault-internal
+    name: bao-secrets-net
 ```
 
-Then reference vault as `http://vault-server:8200` from your application containers.
+The app logs in with `role_id` and `secret_id` from `/run/openbao`, trusts `/run/openbao/ca.crt`,
+and re-reads `secret_id` at each login. A Python client that does exactly this (token reuse,
+a short read cache, stale-if-error, fail-closed) is `orchestrator/secrets.py` in the agent engine.
+
+```mermaid
+flowchart LR
+    VTS["vault-transit-stack<br/>bao-secrets-net"] -->|"AppRole gateway (read agent-ai/)"| ENG["sdk-agent-pipeline<br/>model-gateway ×2"]
+    VTS -->|"AppRole writer (write-only)"| ADM["sdk-agent-pipeline<br/>admin CLI"]
+    VTS -->|"AppRoles api · gateway · controller · mailer"| VC["vanguard-control<br/>(its own copy, same design)"]
+    VTS -->|"AppRole &lt;name&gt;"| OTHER["any project"]
+```
 
 ---
 
-## Security Notes
+## Operations
 
-- **`.env` is gitignored** — never commit it. Use `.env.example` as the reference.
-- **Unseal keys are gitignored** — `vault-unsealer/keys/vault_keys.json` and
-  `docs/ansible-alternative/vars/vault_keys.yml` are excluded.
-  Commit only the `.example` templates.
-- **TLS is disabled** by default (`tls_disable = true`) — acceptable for
-  localhost-only deployments. Enable TLS via the `listener` stanza before
-  exposing Vault to untrusted networks.
-- **`IPC_LOCK` capability** prevents Vault's memory from being swapped to disk.
-  `disable_mlock = true` is set as a fallback for environments that cannot
-  grant this capability.
-- **Port is localhost-only:** `127.0.0.1:8200`. Do not change to `0.0.0.0`
-  without enabling TLS and network-level authentication.
-- **no_log: true** on unseal key submission tasks prevents key material from
-  appearing in Ansible output or log files.
+| Task | Command |
+|---|---|
+| Start / stop (data kept, next start auto-unseals) | `./scripts/start.sh` · `./scripts/stop.sh` |
+| Status of both stores and certificates | `./scripts/status.sh` |
+| Reconfigure (new consumer, mount, policy) | edit `config/`, then `./scripts/init.sh` |
+| Rotate AppRole `secret_id`s (seal and consumers) | `./scripts/init.sh` — monthly, e.g. from cron; rotates what has < 30 days left |
+| Reissue TLS (keeps the CA) | `./scripts/certs.sh --force && docker compose restart` |
+| Days left on certificates | `./scripts/certs.sh --check` |
+| A new plugin version | change `PLUGIN_TAG`/`BINARY_SHA256` in `scripts/plugins.sh` and the `plugin` stanza in `config/openbao/bao.hcl` |
+| Logs | `docker compose logs -f openbao` · audit: `data/main-logs/audit.log` |
+| Reset everything (destructive) | `./scripts/stop.sh -v && rm -rf secrets data` |
+
+### What to back up
+
+`secrets/` (the KMS unseal key, both recovery keys, the CA) and `data/main` + `data/kms`
+(raft storage). Losing `secrets/kms/unseal/kms-unseal-1.key` and the KMS data loses the main
+store's barrier key: keep them in a separate place from the data backups.
 
 ---
 
-## Documentation
+## Environment variables
 
-| Document | Description |
-|----------|-------------|
-| [docs/single-vault-setup.md](docs/single-vault-setup.md) | Complete first-time initialization guide |
-| [docs/ansible-alternative/README.md](docs/ansible-alternative/README.md) | Manual/remote unseal via Ansible (alternative) |
-| [docs/legacy-transit/README.md](docs/legacy-transit/README.md) | When transit auto-unseal is the right choice |
+| Variable | Default | Description |
+|---|---|---|
+| `OPENBAO_IMAGE` | `openbao/openbao:2.7.0` | Image for both stores (pinned) |
+| `BAO_CONTAINER_PREFIX` | `bao` | Container name prefix |
+| `HOST_UID` / `HOST_GID` | `1000` | Container user; owner of `secrets/` and `data/` |
+| `BAO_KMS_NETWORK_NAME` / `BAO_KMS_SUBNET` | `bao-kms-net` / `172.30.48.0/24` | KMS ↔ main store; the seal AppRole is bound to it |
+| `BAO_SECRETS_NETWORK_NAME` / `BAO_SECRETS_SUBNET` | `bao-secrets-net` / `172.30.30.0/24` | Main store ↔ consumers; consumer AppRoles are bound to it |
+| `BAO_SEAL_SECRET_TTL` | `8760h` | `secret_id` lifetime (seal and consumers) |
+| `BAO_SEAL_ROTATE_BEFORE_H` | `720` | Rotate when fewer hours than this are left |
+| `BAO_CONSUMERS_FILE` / `BAO_POLICY_DIR` | `./config/consumers.json` / `./config/policies` | Declarative configuration |
+| `BAO_CERT_DAYS` / `BAO_CA_DAYS` | `397` / `3650` | Certificate lifetimes |
+| `BAO_LOG_MAX_SIZE` / `BAO_LOG_MAX_FILE` | `10m` / `5` | json-file log rotation |
+| `OPENBAO_MEM_LIMIT`, `OPENBAO_CPU_LIMIT`, `OPENBAO_KMS_*` | `256m`, `0.5`, `128m`, `0.25` | Resource limits |
+
+A variable set on the command line wins over `.env`
+(`BAO_CONSUMERS_FILE=./other.json ./scripts/init.sh`).
+
+---
+
+## File structure
+
+```text
+vault-transit-stack/
+├── docker-compose.yml               # openbao-kms + openbao, internal networks, no host ports
+├── .env.example                     # no secrets: everything sensitive is generated in secrets/
+├── config/
+│   ├── consumers.json               # mounts + consumers (the contract with other projects)
+│   ├── policies/                    # one .hcl per policy named in consumers.json
+│   └── openbao/
+│       ├── kms.hcl                  # static seal, transit only, break-glass socket, audit
+│       ├── bao.hcl                  # transit seal, plugin stanza, break-glass socket, audit
+│       ├── kms-autounseal.hcl       # the seal's policy on the KMS (encrypt/decrypt only)
+│       └── openbao-gpg-pub-20240618.asc   # OpenBao's release key (plugin signatures)
+├── scripts/
+│   ├── start.sh / stop.sh / status.sh
+│   ├── init.sh                      # the unseal pipeline (bootstrap, reconfigure, rotate)
+│   ├── certs.sh                     # local CA + server certificates
+│   └── plugins.sh                   # fetch and verify external plugins
+├── secrets/                         # gitignored: keys, recovery keys, AppRoles, TLS
+└── data/                            # gitignored: raft storage, audit logs, sockets, plugins
+```
+
+---
+
+## Security notes
+
+- **No root token survives a run**: `init.sh` revokes its own and any stray one, and strips
+  `root_token` from `init.json`. Administration goes through break-glass (recovery key +
+  host-only socket).
+- **Least privilege per consumer**: the default writer can store a provider key but never
+  read it back; the gateway can read but never write.
+- **Network binding**: AppRole tokens and `secret_id`s only work from their subnet. A login
+  from elsewhere gets `source address … unauthorized by CIDR restrictions`.
+- **The demo trust anchor is a file**: `secrets/kms/unseal/kms-unseal-1.key`. For production,
+  put the KMS on another host or replace it with a cloud KMS / HSM seal on the main store.
+- `secrets/` and `data/` are gitignored; never commit them.
