@@ -1,0 +1,127 @@
+---
+# Vault Transit Stack — OpenBao with a transit mini KMS.
+#
+# openbao-kms : a transit-only OpenBao. It unseals itself with the built-in static seal
+#               from a 32-byte key mounted only into it, and holds the key that seals the
+#               main store.
+# openbao     : the main store (KV v2, transit, AppRole). Auto-unsealed through the KMS's
+#               transit engine; the seal token comes from an AppRole login to the KMS at
+#               every start, so a stop of any length never leaves it without one.
+#
+# Both hardened: non-root, read-only root fs, no capabilities, internal networks only,
+# no host ports. Bootstrap and every later reconfiguration: scripts/init.sh.
+#
+# Consumers (other stacks) join the secrets network as an external network, address the
+# store as https://openbao-secrets:8200 and log in with the AppRole that init.sh wrote for
+# them under secrets/consumers/<name>/.
+# AppRole tokens and secret-ids are bound to that network's subnet.
+
+x-service: &service
+  restart: ${BAO_RESTART_POLICY:-unless-stopped}
+  logging:
+    driver: json-file
+    options:
+      max-size: ${BAO_LOG_MAX_SIZE:-10m}
+      max-file: "${BAO_LOG_MAX_FILE:-5}"
+
+x-healthcheck-timing: &hc-timing
+  interval: ${HEALTHCHECK_INTERVAL:-10s}
+  timeout: ${HEALTHCHECK_TIMEOUT:-5s}
+  retries: ${HEALTHCHECK_RETRIES:-5}
+
+networks:
+  # The main store ↔ its mini KMS only.
+  bao-kms-net:
+    name: ${BAO_KMS_NETWORK_NAME:-bao-kms-net}
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: ${BAO_KMS_SUBNET:-172.30.48.0/24}
+
+  # The main store ↔ its consumers. Fixed subnet: AppRole tokens and secret-ids are bound
+  # to it. Other stacks attach with `external: true` and this name.
+  bao-secrets-net:
+    name: ${BAO_SECRETS_NETWORK_NAME:-bao-secrets-net}
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: ${BAO_SECRETS_SUBNET:-172.30.30.0/24}
+
+services:
+  openbao-kms:
+    image: ${OPENBAO_IMAGE:-openbao/openbao:2.7.0}
+    container_name: ${BAO_CONTAINER_PREFIX:-bao}-openbao-kms
+    hostname: openbao-kms
+    <<: *service
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    entrypoint: ["bao", "server", "-config=/openbao/config/kms.hcl"]
+    read_only: true
+    tmpfs: ["/tmp:size=16m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks: [bao-kms-net]
+    volumes:
+      - ./config/openbao/kms.hcl:/openbao/config/kms.hcl:ro
+      - ./secrets/tls:/openbao/tls:ro
+      - ./secrets/kms/unseal:/openbao/unseal:ro
+      - ./data/kms:/openbao/file:rw
+      - ./data/kms-logs:/openbao/logs:rw
+      # Break-glass Unix socket (config/openbao/kms.hcl): re-issues an expired seal credential.
+      - ./data/kms-run:/openbao/run:rw
+    deploy:
+      resources:
+        limits:
+          memory: ${OPENBAO_KMS_MEM_LIMIT:-128m}
+          cpus: "${OPENBAO_KMS_CPU_LIMIT:-0.25}"
+    healthcheck:
+      # 0 unsealed, 2 sealed/uninitialised (before bootstrap): the server is up.
+      test: ["CMD-SHELL", "BAO_ADDR=https://127.0.0.1:8200 BAO_CACERT=/openbao/tls/ca.crt bao status >/dev/null 2>&1; rc=$$?; [ $$rc -le 2 ]"]
+      <<: *hc-timing
+      start_period: 10s
+
+  openbao:
+    image: ${OPENBAO_IMAGE:-openbao/openbao:2.7.0}
+    container_name: ${BAO_CONTAINER_PREFIX:-bao}-openbao
+    hostname: openbao
+    <<: *service
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    # The transit seal's token comes from an AppRole login to the KMS at every start (OpenBao
+    # Agent's auto-auth pattern): role_id and secret_id are mounted only here and bound to the
+    # KMS subnet. BAO_ADDR is set for the login only: the seal itself would read it.
+    entrypoint: ["sh", "-c", "until [ -s /openbao/seal/role_id ] && [ -s /openbao/seal/secret_id ]; do echo 'waiting for the seal AppRole (scripts/init.sh)'; sleep 3; done; t=$$(BAO_ADDR=https://openbao-kms:8200 BAO_CACERT=/openbao/tls/ca.crt bao write -field=token auth/approle/login role_id=@/openbao/seal/role_id secret_id=@/openbao/seal/secret_id) || { echo 'seal AppRole login failed'; exit 1; }; BAO_TOKEN=\"$$t\" exec bao server -config=/openbao/config/bao.hcl"]
+    read_only: true
+    tmpfs: ["/tmp:size=16m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks:
+      bao-kms-net: {}
+      bao-secrets-net:
+        # Consumers address OpenBao by this network-scoped name, never by "openbao": when OpenBao
+        # also joins another network (a directory's, for the LDAP engine) "openbao" may resolve
+        # there, and the AppRole logins bound to the secrets subnet are refused.
+        aliases: [openbao-secrets]
+    volumes:
+      - ./config/openbao/bao.hcl:/openbao/config/bao.hcl:ro
+      - ./secrets/tls:/openbao/tls:ro
+      - ./secrets/main/seal:/openbao/seal:ro
+      - ./data/main:/openbao/file:rw
+      - ./data/main-logs:/openbao/logs:rw
+      # Break-glass Unix socket (config/openbao/bao.hcl): a host directory (mode 700),
+      # reachable only from this host, never published on a network.
+      - ./data/run:/openbao/run:rw
+      # External plugins, fetched and verified by scripts/plugins.sh (read-only).
+      - ./data/plugins:/openbao/plugins:ro
+    depends_on:
+      openbao-kms:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: ${OPENBAO_MEM_LIMIT:-256m}
+          cpus: "${OPENBAO_CPU_LIMIT:-0.5}"
+    healthcheck:
+      test: ["CMD-SHELL", "BAO_ADDR=https://127.0.0.1:8200 BAO_CACERT=/openbao/tls/ca.crt bao status >/dev/null 2>&1; rc=$$?; [ $$rc -le 2 ]"]
+      <<: *hc-timing
+      start_period: 15s

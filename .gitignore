@@ -1,0 +1,19 @@
+# Local configuration
+.env
+
+# Generated key material: KMS unseal key, recovery keys, AppRole credentials, TLS (scripts/init.sh)
+secrets/
+
+# Runtime data: raft storage, audit logs, break-glass sockets
+data/
+
+# Worktrees
+.claude/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*~
